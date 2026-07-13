@@ -1,0 +1,186 @@
+local GUNS = {
+    "[Double-Barrel SG]", "[TacticalShotgun]", "[Silencer]", "[SilencerAR]",
+    "[AR]", "[Shotgun]", "[Drum-Shotgun]", "[DrumGun]", "[Revolver]",
+    "[Flintlock]", "[AK47]", "[AUG]", "[Rifle]", "[LMG]", "[SMG]", "[P90]",
+    "[Glock]", "[Deagle]"
+}
+
+local SLOT_KEYS = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30 }
+
+local PlayersService = game:get_service("Players")
+
+-- Menu
+
+local MENU = gui.create("One-Tap Cycle", false)
+MENU:set_size(360, 460)
+
+local cycle_enable   = MENU:add_checkbox("Enabled", true)
+local cycle_bind     = MENU:add_keybind("Cycle Key", 0x05)       -- XButton1
+local seq_len        = MENU:add_slider("Seq Length", 1, 3, 3)
+local cycle_gun1     = MENU:add_combo("Gun 1", GUNS, 0)          -- DB
+local cycle_gun2     = MENU:add_combo("Gun 2", GUNS, 1)          -- Tac
+local cycle_gun3     = MENU:add_combo("Gun 3", GUNS, 0)          -- DB
+local fire_first     = MENU:add_checkbox("Fire First", false)
+local skip_equipped  = MENU:add_checkbox("Skip Equipped", true)
+local equip_delay    = MENU:add_slider("Equip Delay ms", 0, 200, 30)
+local shot_delay     = MENU:add_slider("Shot Delay ms", 0, 200, 30)
+local cycle_cooldown = MENU:add_slider("Cooldown ms", 0, 1500, 250)
+local swaponly_bind  = MENU:add_keybind("Swap Only (No Fire)", 0x06) -- XButton2
+
+
+-- Hotbar reading (gun name -> slot key)
+
+local hotbar_cache = nil
+
+local function get_hotbar()
+    if hotbar_cache and hotbar_cache:isvalid() then
+        return hotbar_cache
+    end
+    local coregui = game:get_service("CoreGui")
+    if not coregui:isvalid() then return nil end
+    local robloxgui = coregui:find_first_child("RobloxGui")
+    if not robloxgui:isvalid() then return nil end
+    local backpack = robloxgui:find_first_child("Backpack")
+    if not backpack:isvalid() then return nil end
+    local hb = backpack:find_first_child("Hotbar")
+    if not hb:isvalid() then return nil end
+    hotbar_cache = hb
+    return hb
+end
+
+local function find_gun_slot(gunname)
+    local hb = get_hotbar()
+    if not hb then return nil end
+    for i = 1, 10 do
+        local btn = hb:find_first_child(tostring(i))
+        if btn:isvalid() then
+            local lbl = btn:find_first_child("ToolName")
+            if lbl:isvalid() and lbl:get_label_text() == gunname then
+                return i
+            end
+        end
+    end
+    return nil
+end
+
+local function is_equipped(gunname)
+    local lp = PlayersService.local_player
+    if not lp:isvalid() then return false end
+    local char = lp.character
+    if not char:isvalid() then return false end
+    local tool = char:find_first_child(gunname)
+    return tool:isvalid()
+end
+
+local function equip_gun(gunname)
+    if skip_equipped:get_value() and is_equipped(gunname) then
+        return true -- already in hand, pressing the key would holster it
+    end
+    local slot = find_gun_slot(gunname)
+    if not slot then
+        return false
+    end
+    input.simulate_press(SLOT_KEYS[slot])
+    return true
+end
+
+local function scan_hotbar_debug()
+    local hb = get_hotbar()
+    if not hb then
+        log.add("[Cycle] Hotbar UI not found!", color(1, 0, 0, 1))
+        return
+    end
+    for i = 1, 10 do
+        local btn = hb:find_first_child(tostring(i))
+        if btn:isvalid() then
+            local lbl = btn:find_first_child("ToolName")
+            if lbl:isvalid() then
+                local txt = lbl:get_label_text()
+                if txt ~= "" then
+                    log.add("[Cycle] Slot " .. tostring(i) .. " = " .. txt, color(0, 1, 1, 1))
+                end
+            end
+        end
+    end
+end
+
+MENU:add_button("Scan Hotbar (log slots)", scan_hotbar_debug)
+
+local function can_act()
+    return is_gamefocused() and not menu_active()
+end
+
+
+-- Cycle
+
+local cycle_busy = false
+
+local function cycle_sequence(do_fire)
+    local equip_d = math.floor(equip_delay:get_value())
+    local shot_d  = math.floor(shot_delay:get_value())
+    local len     = math.floor(seq_len:get_value())
+    local combos  = { cycle_gun1, cycle_gun2, cycle_gun3 }
+
+    if do_fire and fire_first:get_value() then
+        input.simulate_mouse_click(MOUSE1)
+        wait(shot_d)
+    end
+
+    for i = 1, len do
+        local name = combos[i]:get_text()
+        if equip_gun(name) then
+            wait(equip_d)
+            if do_fire then
+                input.simulate_mouse_click(MOUSE1)
+                wait(shot_d)
+            end
+        else
+            log.add("[Cycle] " .. name .. " not on hotbar, skipped", color(1, 0.6, 0, 1))
+        end
+    end
+
+    wait(math.floor(cycle_cooldown:get_value()))
+    cycle_busy = false
+end
+
+local function cycle_fire()
+    cycle_sequence(true)
+end
+
+local function cycle_nofire()
+    cycle_sequence(false)
+end
+
+
+-- Bind polling
+
+local prev_cycle_key = false
+local prev_swap_key  = false
+
+spawn(function()
+    while true do
+        if can_act() then
+            local cycle_key = cycle_bind:get_state()
+            local swap_key  = swaponly_bind:get_state()
+
+            if cycle_enable:get_value() and cycle_key and not prev_cycle_key and not cycle_busy then
+                cycle_busy = true
+                spawn(cycle_fire)
+            end
+
+            if cycle_enable:get_value() and swap_key and not prev_swap_key and not cycle_busy then
+                cycle_busy = true
+                spawn(cycle_nofire)
+            end
+
+            prev_cycle_key = cycle_key
+            prev_swap_key  = swap_key
+        else
+            prev_cycle_key = false
+            prev_swap_key  = false
+        end
+        wait(10)
+    end
+end)
+
+log.add("One Tap Cycle loaded", color(0, 1, 1, 1))
