@@ -1,34 +1,38 @@
 local GUNS = {
-    "[Double-Barrel SG]", "[TacticalShotgun]", "[Silencer]", "[SilencerAR]",
-    "[AR]", "[Shotgun]", "[Drum-Shotgun]", "[DrumGun]", "[Revolver]",
-    "[Flintlock]", "[AK47]", "[AUG]", "[Rifle]", "[LMG]", "[SMG]", "[P90]",
-    "[Glock]", "[Deagle]"
+    "[Silencer]", "[Revolver]", "[Flintlock]", "[AUG]", "[Rifle]", "[Glock]", "[Deagle]"
 }
 
 local SLOT_KEYS = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30 }
 
 local PlayersService = game:get_service("Players")
 
--- Menu
+local MENU = gui.create("Gun Macros", false)
+MENU:set_size(380, 780)
 
-local MENU = gui.create("One-Tap Cycle", false)
-MENU:set_size(360, 460)
-
-local cycle_enable   = MENU:add_checkbox("Enabled", true)
-local cycle_bind     = MENU:add_keybind("Cycle Key", 0x05)       -- XButton1
-local seq_len        = MENU:add_slider("Seq Length", 1, 3, 3)
-local cycle_gun1     = MENU:add_combo("Gun 1", GUNS, 0)          -- DB
-local cycle_gun2     = MENU:add_combo("Gun 2", GUNS, 1)          -- Tac
-local cycle_gun3     = MENU:add_combo("Gun 3", GUNS, 0)          -- DB
-local fire_first     = MENU:add_checkbox("Fire First", false)
+MENU:add_label("Guns macro with tb")
+local cycle_enable   = MENU:add_checkbox("Guns Macro", true)
+local cycle_manual_bind = MENU:add_keybind("Manual Cycle Key", 0x56)
+local require_tb_key = MENU:add_checkbox("Compatibility With Triggerbot", true)
+local seq_len        = MENU:add_slider("Seq Length (1-3)", 1, 3, 3)
+local cycle_gun1     = MENU:add_combo("Gun 1", GUNS, 6)
+local gun1_equip     = MENU:add_slider("Equip delay 1 (ms)", 0, 300, 6)
+local cycle_gun2     = MENU:add_combo("Gun 2", GUNS, 0)
+local gun2_equip     = MENU:add_slider("Equip delay 2 (ms)", 0, 300, 2)
+local cycle_gun3     = MENU:add_combo("Gun 3", GUNS, 5)
+local gun3_equip     = MENU:add_slider("Equip delay 3 (ms)", 0, 300, 2)
 local skip_equipped  = MENU:add_checkbox("Skip Equipped", true)
-local equip_delay    = MENU:add_slider("Equip Delay ms", 0, 200, 30)
-local shot_delay     = MENU:add_slider("Shot Delay ms", 0, 200, 30)
-local cycle_cooldown = MENU:add_slider("Cooldown ms", 0, 1500, 250)
-local swaponly_bind  = MENU:add_keybind("Swap Only (No Fire)", 0x06) -- XButton2
+local shot_delay     = MENU:add_slider("Shot Delay (ms)", 0, 200, 6)
+local cycle_cooldown = MENU:add_slider("Cooldown (ms)", 0, 1500, 250)
 
+MENU:add_label("Flintlock")
+local flint_enable = MENU:add_checkbox("Flint Enabled", true)
+local flint_bind   = MENU:add_keybind("Flint Key", 0x58)
+local flint_step   = MENU:add_slider("Flint Step (ms)", 1, 30, 16)
 
--- Hotbar reading (gun name -> slot key)
+MENU:add_label("Rapid Fire (some guns)")
+local rf_enable   = MENU:add_checkbox("RF Enabled", false)
+local rf_bind     = MENU:add_keybind("RF Hold", 0x04)
+local rf_interval = MENU:add_slider("Click Interval (ms)", 1, 50, 1)
 
 local hotbar_cache = nil
 
@@ -63,18 +67,35 @@ local function find_gun_slot(gunname)
     return nil
 end
 
-local function is_equipped(gunname)
+local function get_character()
     local lp = PlayersService.local_player
-    if not lp:isvalid() then return false end
+    if not lp:isvalid() then return nil end
     local char = lp.character
-    if not char:isvalid() then return false end
+    if not char:isvalid() then return nil end
+    return char
+end
+
+local function get_equipped_tool_name()
+    local char = get_character()
+    if not char then return nil end
+    for _, v in pairs(char:get_children()) do
+        if v:isvalid() and v.class_name == "Tool" then
+            return v.name
+        end
+    end
+    return nil
+end
+
+local function is_equipped(gunname)
+    local char = get_character()
+    if not char then return false end
     local tool = char:find_first_child(gunname)
     return tool:isvalid()
 end
 
 local function equip_gun(gunname)
     if skip_equipped:get_value() and is_equipped(gunname) then
-        return true -- already in hand, pressing the key would holster it
+        return true
     end
     local slot = find_gun_slot(gunname)
     if not slot then
@@ -87,7 +108,7 @@ end
 local function scan_hotbar_debug()
     local hb = get_hotbar()
     if not hb then
-        log.add("[Cycle] Hotbar UI not found!", color(1, 0, 0, 1))
+        log.add("[GunMacros] Hotbar UI not found!", color(1, 0, 0, 1))
         return
     end
     for i = 1, 10 do
@@ -97,7 +118,7 @@ local function scan_hotbar_debug()
             if lbl:isvalid() then
                 local txt = lbl:get_label_text()
                 if txt ~= "" then
-                    log.add("[Cycle] Slot " .. tostring(i) .. " = " .. txt, color(0, 1, 1, 1))
+                    log.add("[GunMacros] Slot " .. tostring(i) .. " = " .. txt, color(0, 1, 1, 1))
                 end
             end
         end
@@ -110,77 +131,236 @@ local function can_act()
     return is_gamefocused() and not menu_active()
 end
 
-
--- Cycle
-
 local cycle_busy = false
+local cycle_start_i = 1
+local cycle_fire_all = false
 
-local function cycle_sequence(do_fire)
-    local equip_d = math.floor(equip_delay:get_value())
-    local shot_d  = math.floor(shot_delay:get_value())
-    local len     = math.floor(seq_len:get_value())
-    local combos  = { cycle_gun1, cycle_gun2, cycle_gun3 }
+local function cycle_run()
+    local shot_d = math.floor(shot_delay:get_value())
+    local len = math.floor(seq_len:get_value())
+    local combos = { cycle_gun1, cycle_gun2, cycle_gun3 }
+    local equips = { gun1_equip, gun2_equip, gun3_equip }
 
-    if do_fire and fire_first:get_value() then
-        input.simulate_mouse_click(MOUSE1)
-        wait(shot_d)
-    end
+    local idx = cycle_start_i
 
-    for i = 1, len do
-        local name = combos[i]:get_text()
+    if cycle_fire_all then
+        local name = combos[idx]:get_text()
         if equip_gun(name) then
-            wait(equip_d)
-            if do_fire then
-                input.simulate_mouse_click(MOUSE1)
-                wait(shot_d)
-            end
+            wait(math.floor(equips[idx]:get_value()))
+            input.simulate_mouse_click(MOUSE1)
+            wait(shot_d)
         else
             log.add("[Cycle] " .. name .. " not on hotbar, skipped", color(1, 0.6, 0, 1))
         end
+    else
+        wait(shot_d)
+    end
+
+    local fired = 1
+    while fired < len do
+        idx = idx % len + 1
+        local name = combos[idx]:get_text()
+        if equip_gun(name) then
+            wait(math.floor(equips[idx]:get_value()))
+            input.simulate_mouse_click(MOUSE1)
+            wait(shot_d)
+        else
+            log.add("[Cycle] " .. name .. " not on hotbar, skipped", color(1, 0.6, 0, 1))
+        end
+        fired = fired + 1
     end
 
     wait(math.floor(cycle_cooldown:get_value()))
     cycle_busy = false
 end
 
-local function cycle_fire()
-    cycle_sequence(true)
+local function start_cycle(force_all)
+    if cycle_busy or not cycle_enable:get_value() or not can_act() then
+        return
+    end
+
+    if force_all then
+        cycle_start_i = 1
+        cycle_fire_all = true
+    else
+        local held = get_equipped_tool_name()
+        local len = math.floor(seq_len:get_value())
+        local names = { cycle_gun1:get_text(), cycle_gun2:get_text(), cycle_gun3:get_text() }
+
+        local match_i = nil
+        for i = 1, len do
+            if names[i] == held then
+                match_i = i
+                break
+            end
+        end
+
+        if match_i then
+            cycle_start_i = match_i
+            cycle_fire_all = false
+        else
+            cycle_start_i = 1
+            cycle_fire_all = true
+        end
+    end
+
+    cycle_busy = true
+    spawn(cycle_run)
 end
 
-local function cycle_nofire()
-    cycle_sequence(false)
+local last_ammo_gun = nil
+local last_ammo = nil
+
+local function shot_watch()
+    if cycle_busy or not cycle_enable:get_value() then
+        last_ammo_gun = nil
+        return
+    end
+
+    if not require_tb_key:get_value() then
+        last_ammo_gun = nil
+        return
+    end
+    if not keybind_active("triggerbot") then
+        last_ammo_gun = nil
+        return
+    end
+
+    local char = get_character()
+    if not char then
+        last_ammo_gun = nil
+        return
+    end
+
+    local len = math.floor(seq_len:get_value())
+    local names = { cycle_gun1:get_text(), cycle_gun2:get_text(), cycle_gun3:get_text() }
+    local match_i = nil
+    local tool = nil
+    for i = 1, len do
+        local t = char:find_first_child(names[i])
+        if t:isvalid() then
+            match_i = i
+            tool = t
+            break
+        end
+    end
+    if not match_i then
+        last_ammo_gun = nil
+        return
+    end
+
+    local held = names[match_i]
+    local a = tool:find_first_child("Ammo")
+    if not a:isvalid() then return end
+    local ammo = a:get_value_int()
+    if ammo == nil then return end
+
+    if last_ammo_gun == held and last_ammo ~= nil and ammo < last_ammo then
+        last_ammo_gun = nil
+        cycle_start_i = match_i
+        cycle_fire_all = false
+        cycle_busy = true
+        spawn(cycle_run)
+        return
+    end
+
+    last_ammo_gun = held
+    last_ammo = ammo
 end
 
+hook.remove("render", "knife_check_state")
+hook.remove("render", "gunmacros_knife_state")
+hook.remove("triggerbot_ignore", "knife_check_block")
+hook.remove("triggerbot_ignore", "gunmacros_knife_ignore")
+hook.remove("triggerbot_shouldfire", "onetap_cycle_tb")
+hook.remove("triggerbot_shouldfire", "gunmacros_shouldfire")
+hook.remove("triggerbot_shouldfire", "gunmacros_cycle")
 
--- Bind polling
+hook.add("triggerbot_shouldfire", "gunmacros_shouldfire", function(plr)
+    if cycle_busy then
+        return false
+    end
+    return true
+end)
 
+local flint_busy = false
+local FLINT_GUN = "[Flintlock]"
+local FLINT_CANCEL = "[Knife]"
+
+local function flint_sequence()
+    local gun_slot   = find_gun_slot(FLINT_GUN)
+    local knife_slot = find_gun_slot(FLINT_CANCEL)
+    if not gun_slot then
+        log.add("[Flint] " .. FLINT_GUN .. " not on hotbar", color(1, 0.6, 0, 1))
+        flint_busy = false
+        return
+    end
+    if not knife_slot then
+        log.add("[Flint] " .. FLINT_CANCEL .. " not on hotbar", color(1, 0.6, 0, 1))
+        flint_busy = false
+        return
+    end
+
+    local step = math.floor(flint_step:get_value())
+
+    input.simulate_mouse_down(MOUSE1)
+    wait(step)
+    input.simulate_mouse_up(MOUSE1)
+    wait(step)
+    input.simulate_press(SLOT_KEYS[gun_slot])
+    input.simulate_mouse_down(MOUSE1)
+    wait(step)
+    input.simulate_mouse_up(MOUSE1)
+    wait(step)
+    input.simulate_press(SLOT_KEYS[knife_slot])
+
+    wait(1200)
+    flint_busy = false
+end
+
+local rf_holding = false
+local prev_flint_key = false
 local prev_cycle_key = false
-local prev_swap_key  = false
 
 spawn(function()
     while true do
         if can_act() then
-            local cycle_key = cycle_bind:get_state()
-            local swap_key  = swaponly_bind:get_state()
+            shot_watch()
 
-            if cycle_enable:get_value() and cycle_key and not prev_cycle_key and not cycle_busy then
-                cycle_busy = true
-                spawn(cycle_fire)
+            local cycle_key = cycle_manual_bind:get_state()
+            if cycle_enable:get_value() and (not require_tb_key:get_value()) and cycle_key and not prev_cycle_key and not cycle_busy then
+                start_cycle(true)
             end
-
-            if cycle_enable:get_value() and swap_key and not prev_swap_key and not cycle_busy then
-                cycle_busy = true
-                spawn(cycle_nofire)
-            end
-
             prev_cycle_key = cycle_key
-            prev_swap_key  = swap_key
+
+            local flint_key = flint_bind:get_state()
+            if flint_enable:get_value() and flint_key and not prev_flint_key and not flint_busy then
+                flint_busy = true
+                spawn(flint_sequence)
+            end
+            prev_flint_key = flint_key
+
+            if rf_enable:get_value() and rf_bind:get_state() then
+                input.simulate_mouse_down(MOUSE1)
+                rf_holding = true
+                wait(math.floor(rf_interval:get_value()))
+            else
+                if rf_holding then
+                    input.simulate_mouse_up(MOUSE1)
+                    rf_holding = false
+                end
+                wait(10)
+            end
         else
+            if rf_holding then
+                input.simulate_mouse_up(MOUSE1)
+                rf_holding = false
+            end
             prev_cycle_key = false
-            prev_swap_key  = false
+            prev_flint_key = false
+            wait(50)
         end
-        wait(10)
     end
 end)
 
-log.add("One Tap Cycle loaded", color(0, 1, 1, 1))
+log.add("gun macros loaded", color(0, 1, 1, 1))
