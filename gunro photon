@@ -43,7 +43,7 @@ local MOUSE2 = 0x02
 local ATTR_NUMBER = 5
 
 -- ================= tunables (ms) =================
-local AutoParryRange = 40
+local AutoParryRange = 11.5
 local ParryWindowMs = 60
 local ProbabilityToParry = 100
 local DefaultReactionMs = 100
